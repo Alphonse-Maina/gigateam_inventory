@@ -1,0 +1,82 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function myRole() {
+      return myProfile().role;
+    }
+
+    function myStoreId() {
+      return myProfile().storeId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && myRole() == 'admin';
+    }
+
+    function isManagerOfStore(storeId) {
+      return isSignedIn() && myRole() == 'manager' && myStoreId() == storeId;
+    }
+
+    // Any signed-in, active account can READ across stores — this is what
+    // lets staff/managers search "who has what" everywhere. Only Admins,
+    // and the Manager who owns that specific store, may WRITE to it.
+    match /stores/{storeId} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || isManagerOfStore(storeId);
+
+      match /items/{itemId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isAdmin() || isManagerOfStore(storeId);
+      }
+    }
+
+    // Stock requests: any signed-in user can create one (that's how staff
+    // "ask" for stock). Only an Admin or the manager of the store being
+    // asked (fromStoreId) may update its status.
+    match /requests/{requestId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isAdmin() || isManagerOfStore(resource.data.fromStoreId);
+      allow delete: if isAdmin();
+    }
+
+    // Activity log: append-only, and only Admins may ever read the full
+    // collection — this is the audit trail described in the product spec
+    // ("every log can be seen by admin"). Writes happen from the app
+    // whenever an item or request mutates, by whoever performed that
+    // mutation (so it must be creatable by managers too).
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // Users: everyone can read basic profiles (needed to show manager
+    // names, requester names, etc.) but only Admins manage accounts, and a
+    // user may only ever edit their own profile fields (e.g. phone number).
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (isSignedIn() && request.auth.uid == uid
+                      && request.resource.data.role == resource.data.role
+                      && request.resource.data.storeId == resource.data.storeId);
+
+      match /notifications/{notifId} {
+        allow read, update: if isSignedIn() && request.auth.uid == uid;
+        allow create: if isSignedIn(); // written by other users' actions (e.g. a request)
+        allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+      }
+    }
+  }
+}
